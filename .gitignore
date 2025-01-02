@@ -1,0 +1,29 @@
+/target/
+**/*.rs.bk
+
+# Cargo.lock
+# Keep if publishing a library; include if binary-only.
+Cargo.lock
+
+# IDE
+/.idea/
+/.vscode/
+*.swp
+*.swo
+.zed
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Build artifacts
+*.tmp
+*.temp
+
+# OS
+desktop.ini
+
+# Local notes / Node artifacts
+AGENTS.md
+package-lock.json

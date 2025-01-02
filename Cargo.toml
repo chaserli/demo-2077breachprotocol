@@ -1,0 +1,12 @@
+[package]
+name = "rust_breach_protocol"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.8"
+macroquad = "0.4"
+
+[package.metadata.bundle]
+name = "Breach Protocol"
+icon = ["assets/icons/icon.icns", "assets/icons/icon.ico"]
