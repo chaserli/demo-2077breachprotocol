@@ -1,15 +1,23 @@
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
-use std::time::{Duration, Instant};
 
 pub type Token = String;
 pub type Cell = (usize, usize);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConstraintMode {
     Row,
     Column,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TerminalReason {
+    AllUploaded,
+    BufferFull,
+    OutOfTime,
+    NoLegalMoves,
+    NoCompletableSequences,
 }
 
 #[derive(Clone, Debug)]
@@ -30,14 +38,11 @@ pub struct BreachState {
     pub selected_cells: HashSet<Cell>,
     pub current_constraint: ConstraintMode,
     pub current_index: Option<Cell>,
-    pub time_started: bool,
-    pub time_started_at: Option<Instant>,
-    pub time_completed_at: Option<Instant>,
     pub uploaded_results: Vec<bool>,
-    pub timer_override: Option<Duration>,
+    pub terminal_reason: Option<TerminalReason>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GameEngine {
     pub config: BreachConfig,
     pub state: BreachState,
@@ -76,6 +81,7 @@ pub struct GameResult {
     pub buffer_used: usize,
     pub buffer_full: bool,
     pub out_of_time: bool,
+    pub terminal_reason: Option<TerminalReason>,
     pub sequence_results: Vec<SequenceResult>,
 }
 
@@ -121,14 +127,13 @@ impl GameEngine {
             selected_cells: HashSet::new(),
             current_constraint: ConstraintMode::Row,
             current_index: None,
-            time_started: false,
-            time_started_at: None,
-            time_completed_at: None,
             uploaded_results,
-            timer_override: None,
+            terminal_reason: None,
         };
 
-        Ok(Self { config, state })
+        let mut engine = Self { config, state };
+        engine.update_terminal_reason();
+        Ok(engine)
     }
 
     pub fn legal_moves(&self) -> HashSet<Cell> {
@@ -164,14 +169,38 @@ impl GameEngine {
         self.legal_moves().contains(&cell)
     }
 
+    pub fn has_legal_moves(&self) -> bool {
+        if self.state.buffer_tokens.is_empty() {
+            return self.config.matrix_size > 0;
+        }
+
+        match self.state.current_constraint {
+            ConstraintMode::Row => {
+                if let Some((row, _)) = self.state.current_index {
+                    (0..self.config.matrix_size)
+                        .any(|col| !self.state.selected_cells.contains(&(row, col)))
+                } else {
+                    false
+                }
+            }
+            ConstraintMode::Column => {
+                if let Some((_, col)) = self.state.current_index {
+                    (0..self.config.matrix_size)
+                        .any(|row| !self.state.selected_cells.contains(&(row, col)))
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     pub fn apply_move(&mut self, cell: Cell) -> Result<(), GameError> {
-        if !self.is_valid_move(cell) {
+        if self.state.terminal_reason.is_some() {
             return Err(GameError::InvalidMove(cell));
         }
 
-        if !self.state.time_started {
-            self.state.time_started = true;
-            self.state.time_started_at = Some(Instant::now());
+        if !self.is_valid_move(cell) {
+            return Err(GameError::InvalidMove(cell));
         }
 
         let (row, col) = cell;
@@ -182,76 +211,25 @@ impl GameEngine {
 
         self.evaluate_uploaded();
 
-        if self.state.uploaded_results.iter().all(|&done| done)
-            && self.state.time_completed_at.is_none()
-        {
-            self.state.time_completed_at = Some(Instant::now());
-        }
-
         self.state.current_constraint = match self.state.current_constraint {
             ConstraintMode::Row => ConstraintMode::Column,
             ConstraintMode::Column => ConstraintMode::Row,
         };
+        self.update_terminal_reason();
 
         Ok(())
     }
 
-    pub fn get_remaining_time(&self) -> Duration {
-        if self.config.time_limit_seconds == 0 {
-            return Duration::MAX;
-        }
-
-        if !self.state.time_started {
-            return Duration::from_secs(self.config.time_limit_seconds);
-        }
-
-        if let Some(override_time) = self.state.timer_override {
-            return override_time;
-        }
-
-        if let Some(started) = self.state.time_started_at {
-            let elapsed = if let Some(completed) = self.state.time_completed_at {
-                completed.duration_since(started)
-            } else {
-                started.elapsed()
-            };
-            let total = Duration::from_secs(self.config.time_limit_seconds);
-            if elapsed >= total {
-                Duration::ZERO
-            } else {
-                total - elapsed
-            }
-        } else {
-            Duration::from_secs(self.config.time_limit_seconds)
-        }
-    }
-
     pub fn is_terminal(&self) -> bool {
-        if self.config.time_limit_seconds != 0 && self.get_remaining_time().is_zero() {
-            return true;
-        }
-
-        if self.state.buffer_tokens.len() >= self.config.buffer_size {
-            return true;
-        }
-
-        if self.legal_moves().is_empty() {
-            return true;
-        }
-
-        self.state.uploaded_results.iter().all(|uploaded| *uploaded)
+        self.state.terminal_reason.is_some()
     }
 
     pub fn evaluate_uploaded(&mut self) {
-        let buffer = self.state.buffer_tokens.join("");
-
         for (idx, sequence) in self.state.sequences.iter().enumerate() {
             if self.state.uploaded_results[idx] {
                 continue;
             }
-
-            let sequence_str = sequence.join("");
-            if buffer.contains(&sequence_str) {
+            if sequence_in_buffer(&self.state.buffer_tokens, sequence) {
                 self.state.uploaded_results[idx] = true;
             }
         }
@@ -290,12 +268,118 @@ impl GameEngine {
             total_sequences: self.state.sequences.len(),
             buffer_used: self.state.buffer_tokens.len(),
             buffer_full: self.state.buffer_tokens.len() >= self.config.buffer_size,
-            out_of_time: self.get_remaining_time().is_zero(),
+            out_of_time: self.state.terminal_reason == Some(TerminalReason::OutOfTime),
+            terminal_reason: self.state.terminal_reason,
             sequence_results,
         }
     }
 
-    pub fn set_timer_override(&mut self, duration: Duration) {
-        self.state.timer_override = Some(duration);
+    pub fn terminal_reason(&self) -> Option<TerminalReason> {
+        self.state.terminal_reason
     }
+
+    pub fn force_timeout(&mut self) {
+        if self.state.terminal_reason.is_none() {
+            self.state.terminal_reason = Some(TerminalReason::OutOfTime);
+        }
+    }
+
+    pub fn has_uploaded_all_sequences(&self) -> bool {
+        !self.state.sequences.is_empty()
+            && self.state.uploaded_results.iter().all(|uploaded| *uploaded)
+    }
+
+    fn has_unuploaded_sequences(&self) -> bool {
+        self.state
+            .uploaded_results
+            .iter()
+            .any(|uploaded| !*uploaded)
+    }
+
+    pub fn can_sequence_still_upload(&self, sequence_index: usize) -> bool {
+        let Some(sequence) = self.state.sequences.get(sequence_index) else {
+            return false;
+        };
+        if self
+            .state
+            .uploaded_results
+            .get(sequence_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        sequence_can_still_upload(
+            &self.state.buffer_tokens,
+            sequence,
+            self.config
+                .buffer_size
+                .saturating_sub(self.state.buffer_tokens.len()),
+        )
+    }
+
+    pub fn sequence_progress(&self, sequence_index: usize) -> usize {
+        let Some(sequence) = self.state.sequences.get(sequence_index) else {
+            return 0;
+        };
+        sequence_suffix_progress(&self.state.buffer_tokens, sequence)
+    }
+
+    pub fn has_completable_sequence(&self) -> bool {
+        self.state.sequences.iter().enumerate().any(|(idx, _)| {
+            !self.state.uploaded_results[idx] && self.can_sequence_still_upload(idx)
+        })
+    }
+
+    fn update_terminal_reason(&mut self) {
+        if self.state.terminal_reason == Some(TerminalReason::OutOfTime) {
+            return;
+        }
+
+        self.state.terminal_reason = if self.has_uploaded_all_sequences() {
+            Some(TerminalReason::AllUploaded)
+        } else if self.state.buffer_tokens.len() >= self.config.buffer_size {
+            Some(TerminalReason::BufferFull)
+        } else if !self.has_legal_moves() {
+            Some(TerminalReason::NoLegalMoves)
+        } else if self.has_unuploaded_sequences() && !self.has_completable_sequence() {
+            Some(TerminalReason::NoCompletableSequences)
+        } else {
+            None
+        };
+    }
+}
+
+fn sequence_in_buffer(buffer: &[Token], sequence: &[Token]) -> bool {
+    !sequence.is_empty()
+        && sequence.len() <= buffer.len()
+        && buffer
+            .windows(sequence.len())
+            .any(|window| window == sequence)
+}
+
+fn sequence_can_still_upload(buffer: &[Token], sequence: &[Token], remaining_slots: usize) -> bool {
+    if sequence.is_empty() || sequence_in_buffer(buffer, sequence) {
+        return true;
+    }
+    if sequence.len() <= remaining_slots {
+        return true;
+    }
+
+    let progress = sequence_suffix_progress(buffer, sequence);
+    progress > 0 && sequence.len().saturating_sub(progress) <= remaining_slots
+}
+
+fn sequence_suffix_progress(buffer: &[Token], sequence: &[Token]) -> usize {
+    if sequence.is_empty() {
+        return 0;
+    }
+    let max_len = sequence.len().min(buffer.len());
+    for len in (1..=max_len).rev() {
+        if buffer[buffer.len() - len..] == sequence[..len] {
+            return len;
+        }
+    }
+    0
 }

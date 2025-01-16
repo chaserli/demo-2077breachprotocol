@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 rand = "0.8"
-macroquad = "0.4"
+macroquad = { version = "0.4", features = ["audio"] }
 
 [package.metadata.bundle]
 name = "Breach Protocol"
-icon = ["assets/icons/icon.icns", "assets/icons/icon.ico"]
+icon = ["assets/icons/logo.icns", "assets/icons/logo.ico"]

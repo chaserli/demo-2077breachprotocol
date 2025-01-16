@@ -25,5 +25,6 @@ Cargo.lock
 desktop.ini
 
 # Local notes / Node artifacts
-AGENTS.md
 package-lock.json
+
+.full-review
